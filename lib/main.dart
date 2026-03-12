@@ -24,7 +24,10 @@ class PhotoMapScreen extends StatefulWidget {
 
 class _PhotoMapScreenState extends State<PhotoMapScreen> {
   GoogleMapController? _mapController;
-  final ScrollController _panoramaController = ScrollController();
+  
+  // 🔥 PageController로 변경: 뷰포트를 줄여서 양옆 사진이 살짝 보이게 (필름 효과)
+  final PageController _pageController = PageController(viewportFraction: 0.25);
+  int _lastSyncedIndex = -1;
 
   Set<Marker> _markers = {};
   Set<Marker> _allTripMarkers = {}; 
@@ -34,33 +37,37 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
   bool _isLoading = false;
   String _statusText = "준비 중...";
-  
-  // 🔥 로딩 상태 표시용 변수
   int _processedCount = 0;
   int _totalCount = 0;
 
   @override
   void initState() {
     super.initState();
-    _panoramaController.addListener(_onPanoramaScroll);
-    // 처음엔 최근 3개월만 분석
+    _pageController.addListener(_onPageScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _buildTravelPath(loadAll: false));
   }
 
-  void _onPanoramaScroll() {
-    if (_selectedTripIndex == null || _isLoading) return;
+  // 🔥 스크롤 시 카메라 동기화
+  void _onPageScroll() {
+    if (_selectedTripIndex == null || _isLoading || !_pageController.hasClients) return;
+    
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
     if (allPhotos.isEmpty) return;
 
-    int currentIndex = (_panoramaController.offset / 88.0).round().clamp(0, allPhotos.length - 1);
-    final loc = allPhotos[currentIndex].location;
-    if (loc != null) {
-      _mapController?.animateCamera(CameraUpdate.newLatLng(loc));
+    double page = _pageController.page ?? 0;
+    int currentIndex = page.round().clamp(0, allPhotos.length - 1);
+    
+    // 너무 잦은 지도 업데이트 방지
+    if (_lastSyncedIndex != currentIndex) {
+      _lastSyncedIndex = currentIndex;
+      final loc = allPhotos[currentIndex].location;
+      if (loc != null) {
+        _mapController?.animateCamera(CameraUpdate.newLatLng(loc));
+      }
     }
   }
 
-  // 🔥 파라미터로 전체 불러오기 여부를 받음
   Future<void> _buildTravelPath({required bool loadAll}) async {
     setState(() { 
       _isLoading = true; 
@@ -78,29 +85,22 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final albums = await pm.PhotoManager.getAssetPathList(type: pm.RequestType.image, onlyAll: true);
     if (albums.isEmpty) return;
 
-    // 전체를 부를 땐 앨범 전체 개수, 아니면 넉넉히 최대치로 잡고 날짜로 자름
     int fetchCount = loadAll ? await albums[0].assetCountAsync : 5000;
     final assets = await albums[0].getAssetListRange(start: 0, end: fetchCount);
-    
     DateTime threeMonthsAgo = DateTime.now().subtract(const Duration(days: 90));
 
     List<RawPhoto> rawPhotos = [];
     setState(() { _totalCount = assets.length; });
 
-    // 🔥 여기서부터 100장씩 병렬 처리하는 핵심 로직!
     int chunkSize = 100;
-
     for (int i = 0; i < assets.length; i += chunkSize) {
-      // 3개월 이전 사진인지 확인 (현재 묶음의 첫 번째 사진 기준)
       if (!loadAll && assets[i].createDateTime.isBefore(threeMonthsAgo)) {
-        setState(() { _totalCount = i; }); // 실제 처리할 총 장수 수정
+        setState(() { _totalCount = i; }); 
         break;
       }
 
       int end = (i + chunkSize < assets.length) ? i + chunkSize : assets.length;
       var chunk = assets.sublist(i, end);
-
-      // 🚀 마법의 코드: 100장의 GPS 정보를 '동시에' 물어보고 가져옵니다!
       var locations = await Future.wait(chunk.map((a) => a.latlngAsync()));
 
       for (int j = 0; j < chunk.length; j++) {
@@ -118,7 +118,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         ));
       }
 
-      // 100장 묶음이 끝날 때마다 화면의 로딩바를 갱신해 줍니다.
       setState(() { 
         _processedCount = end; 
         _statusText = "사진 위치 쾌속으로 읽는 중... ($_processedCount / $_totalCount)"; 
@@ -128,23 +127,34 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     setState(() { _statusText = "사진 정리 중... (잠시만 기다려주세요)"; });
     final analyzedTrips = await compute(_runAnalysis, rawPhotos);
 
+    // 🔥 여기서 중요도를 계산해서 정렬합니다 (여행 우선, 그 다음 사진 갯수)
+    analyzedTrips.sort((a, b) {
+      if (a.isTrip && !b.isTrip) return -1; // 여행 우선
+      if (!a.isTrip && b.isTrip) return 1;
+      return b.totalPhotoCount.compareTo(a.totalPhotoCount); // 장수 많은 순
+    });
+
     Set<Marker> overviewMarkers = {};
-    for (int i = 0; i < analyzedTrips.length; i++) {
-      final trip = analyzedTrips[i];
+    
+    // 🔥 화면에 핀이 너무 꽉 차지 않게 상위 15개(여행 위주)만 지도에 표시합니다.
+    final displayTrips = analyzedTrips.take(15).toList();
+
+    for (int i = 0; i < displayTrips.length; i++) {
+      final trip = displayTrips[i];
       if (trip.places.isEmpty) continue;
       
-      final firstPlace = trip.places.first;
-      final bestPhoto = firstPlace.representative.originalAsset;
+      // 🔥 첫 장소가 아니라, 사진이 '가장 많은 장소(메인 목적지)'에 핀을 꽂음
+      final mainPlace = trip.mainPlace;
+      final bestPhoto = mainPlace.representative.originalAsset;
       
       if (bestPhoto != null) {
-        // 🔥 여행은 오렌지색, 일상은 하얀색 테두리
         Color borderColor = trip.isTrip ? Colors.orangeAccent : Colors.white;
         
         overviewMarkers.add(Marker(
           markerId: MarkerId("ov_$i"),
-          position: firstPlace.centroid,
-          icon: await _getPhotoMarker(bestPhoto, borderColor),
-          onTap: () => _onTripSelected(i),
+          position: mainPlace.centroid,
+          icon: await _getPhotoMarker(bestPhoto, borderColor, count: trip.totalPhotoCount),
+          onTap: () => _onTripSelected(analyzedTrips.indexOf(trip)), // 전체 리스트에서의 인덱스 전달
         ));
       }
     }
@@ -165,9 +175,14 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
   Future<void> _onTripSelected(int index) async {
     setState(() { _selectedTripIndex = index; _isLoading = true; });
+    
+    // 새 여행을 누르면 파노라마 리스트 위치를 맨 처음(0)으로 초기화
+    if (_pageController.hasClients) {
+      _pageController.jumpToPage(0);
+    }
+
     final trip = _trips[index];
     
-    // 🔥 여행일 때만 주황색 선 그리기 (일상은 선 없음)
     if (trip.isTrip && trip.path.length > 1) {
       _polylines = { Polyline(polylineId: PolylineId("p$index"), points: trip.path, color: Colors.orange, width: 5) };
     } else {
@@ -181,7 +196,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         detailMarkers.add(Marker(
           markerId: MarkerId("pl$i"),
           position: trip.places[i].centroid,
-          icon: await _getPhotoMarker(asset, Colors.white), // 세부 마커는 기본 흰색
+          icon: await _getPhotoMarker(asset, Colors.white), 
         ));
       }
     }
@@ -203,22 +218,39 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng));
   }
 
-  // 🔥 테두리 색상(borderColor)을 받도록 수정
-  Future<BitmapDescriptor> _getPhotoMarker(pm.AssetEntity entity, Color borderColor) async {
+  // 🔥 count 파라미터 추가하여 우측 상단에 갯수 배지 달기
+  Future<BitmapDescriptor> _getPhotoMarker(pm.AssetEntity entity, Color borderColor, {int? count}) async {
     final data = await entity.thumbnailDataWithSize(const pm.ThumbnailSize(100, 100));
     if (data == null) return BitmapDescriptor.defaultMarker;
     final codec = await ui.instantiateImageCodec(data);
     final fi = await codec.getNextFrame();
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
-    const size = 60.0; // 테두리를 잘 보이게 약간 키움
+    const size = 60.0; 
     
-    // 테두리 그리기
+    // 사진 그리기
     canvas.drawCircle(const Offset(size/2, size/2), size/2, Paint()..color = borderColor);
-    // 사진이 들어갈 둥근 영역 클리핑 (테두리 두께 4px)
     canvas.clipPath(Path()..addOval(const Rect.fromLTWH(4, 4, size-8, size-8)));
     canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(0, 0, size, size), Paint());
     
+    // 🔥 배지 그리기 (count가 있을 때만)
+    if (count != null && count > 0) {
+      String text = count > 99 ? "99+" : count.toString();
+      final textPainter = TextPainter(
+        text: TextSpan(text: text, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+        textDirection: TextDirection.ltr,
+      );
+      textPainter.layout();
+      
+      // 빨간색 원 배지
+      double badgeRadius = 12.0;
+      Offset badgeCenter = const Offset(size - 12, 12);
+      canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.redAccent);
+      
+      // 텍스트 위치 중앙 정렬
+      textPainter.paint(canvas, Offset(badgeCenter.dx - textPainter.width/2, badgeCenter.hitTestable ? badgeCenter.dy - textPainter.height/2 - 1 : badgeCenter.dy - textPainter.height/2));
+    }
+
     final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
     if (bytes == null) return BitmapDescriptor.defaultMarker;
@@ -240,13 +272,11 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           ),
           Positioned(top: 20, left: 20, right: 20, child: _buildStatusCard()),
           
-          // 🔥 장수 기반 로딩 바 추가
           if (_isLoading) _buildLoadingOverlay(),
           
-          if (_selectedTripIndex != null) Positioned(bottom: 30, left: 0, right: 0, child: _buildTripListView()),
+          if (_selectedTripIndex != null) Positioned(bottom: 20, left: 0, right: 0, child: _buildTripFilmStrip()),
         ],
       ),
-      // 🔥 모든 사진 분석하는 플로팅 버튼 추가
       floatingActionButton: (_isLoading || _selectedTripIndex != null) ? null : FloatingActionButton.extended(
         onPressed: () => _buildTravelPath(loadAll: true),
         label: const Text("모든 사진 분석하기"),
@@ -262,7 +292,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     child: Text(_statusText, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold)),
   );
 
-  // 🔥 로딩 바 UI
   Widget _buildLoadingOverlay() {
     return Positioned(
       bottom: 50, left: 40, right: 40,
@@ -272,7 +301,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text("데이터를 처리 중입니다...", style: const TextStyle(color: Colors.white, fontSize: 14)),
+            const Text("데이터를 처리 중입니다...", style: TextStyle(color: Colors.white, fontSize: 14)),
             const SizedBox(height: 10),
             LinearProgressIndicator(
               value: _totalCount == 0 ? null : (_processedCount / _totalCount),
@@ -280,35 +309,60 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
               color: Colors.orangeAccent,
             ),
             const SizedBox(height: 10),
-            Text(
-              "$_processedCount / $_totalCount 장", 
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)
-            ),
+            Text("$_processedCount / $_totalCount 장", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildTripListView() {
+  // 🔥 영화 필름처럼 스르륵 넘어가는 UI (AnimatedBuilder 활용)
+  Widget _buildTripFilmStrip() {
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
+    
     return SizedBox(
-      height: 140,
-      child: ListView.builder(
-        controller: _panoramaController,
-        scrollDirection: Axis.horizontal,
+      height: 120, // 높이를 작게 줄여서 하단에 깔리게 함
+      child: PageView.builder(
+        controller: _pageController,
         itemCount: allPhotos.length,
         itemBuilder: (context, idx) {
           final asset = allPhotos[idx].originalAsset;
           if (asset == null) return const SizedBox.shrink();
-          return Container(
-            width: 100, 
-            margin: const EdgeInsets.all(8), 
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10), 
-              child: AssetEntityImage(asset, fit: BoxFit.cover)
-            )
+
+          return AnimatedBuilder(
+            animation: _pageController,
+            builder: (context, child) {
+              double value = 1.0;
+              if (_pageController.position.haveDimensions) {
+                value = _pageController.page! - idx;
+                // 멀어질수록 크기를 줄임 (0.7배까지)
+                value = (1 - (value.abs() * 0.3)).clamp(0.0, 1.0);
+              }
+              return Center(
+                child: SizedBox(
+                  // 선택된 건 100, 양옆은 70 정도로 작아짐
+                  height: Curves.easeOut.transform(value) * 100,
+                  width: Curves.easeOut.transform(value) * 100,
+                  child: Opacity(
+                    // 선택된 건 100% 선명, 양옆은 반투명(40%)
+                    opacity: value.clamp(0.4, 1.0), 
+                    child: child,
+                  ),
+                ),
+              );
+            },
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 5),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12), 
+                child: AssetEntityImage(asset, fit: BoxFit.cover)
+              )
+            ),
           );
         },
       ),
