@@ -49,7 +49,7 @@ class Trip {
   final DateTime end;
   final List<Place> places;
   final List<LatLng> path;
-  final bool isTrip; // 🔥 일상인지 여행인지 구분하는 변수 추가!
+  final bool isTrip; 
 
   Trip({
     required this.title, 
@@ -59,6 +59,15 @@ class Trip {
     required this.path,
     this.isTrip = true,
   });
+
+  // 🔥 핵심 방문지: 사진이 가장 많이 찍힌 장소를 이 여행의 메인 목적지로 판단!
+  Place get mainPlace {
+    if (places.isEmpty) throw StateError("No places");
+    return places.reduce((a, b) => a.photos.length > b.photos.length ? a : b);
+  }
+
+  // 🔥 총 사진 갯수
+  int get totalPhotoCount => places.fold(0, (sum, p) => sum + p.photos.length);
 }
 
 class UltimateTravelEngine {
@@ -97,7 +106,6 @@ class UltimateTravelEngine {
           isTraveling = true;
           currentTripPhotos = [p];
         } else {
-          // 🔥 집에 있을 때 찍은 사진도 버리지 않고 '일상'으로 담기 위해 저장
           currentTripPhotos.add(p);
         }
       } else {
@@ -107,12 +115,11 @@ class UltimateTravelEngine {
 
         if (isHomeEntry || isInactive) {
           bool validTrip = currentTripPhotos.length >= 5 && currentTripPhotos.last.time.difference(currentTripPhotos.first.time).inMinutes >= kMinTripStayMinutes;
-          // 🔥 여행 기준 미달이어도 버리지 않고 forceDaily: true로 일상으로 저장
           var trip = _finalizeTrip(currentTripPhotos, forceDaily: !validTrip);
           if (trip != null) trips.add(trip);
           
           isTraveling = false;
-          currentTripPhotos = [p]; // 현재 사진부터 다시 수집
+          currentTripPhotos = [p]; 
         } else {
           currentTripPhotos.add(p);
         }
@@ -125,7 +132,6 @@ class UltimateTravelEngine {
     return trips;
   }
 
-  // 🔥 forceDaily 파라미터 추가하여 일상과 여행의 타이틀 및 플래그 분리
   Trip? _finalizeTrip(List<RawPhoto> photos, {bool forceDaily = false}) {
     if (photos.isEmpty) return null;
     var places = _clusterPlaces(photos);
@@ -162,7 +168,6 @@ class UltimateTravelEngine {
       if (p.clusterId != null && p.clusterId! > 0) {
         groups.putIfAbsent(p.clusterId!, () => []).add(p);
       } else if (p.clusterId == -1) {
-        // 🔥 군집화 실패한 낱개 사진도 버리지 않고 개별 장소로 취급
         groups.putIfAbsent(--currentCid, () => []).add(p);
       }
     }
