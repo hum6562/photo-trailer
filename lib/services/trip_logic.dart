@@ -13,7 +13,6 @@ class RawPhoto {
   int? clusterId;
   final pm.AssetEntity? originalAsset;
 
-  // 모든 final 변수를 생성자에서 확실하게 초기화합니다.
   RawPhoto({
     required this.id,
     this.location,
@@ -50,13 +49,15 @@ class Trip {
   final DateTime end;
   final List<Place> places;
   final List<LatLng> path;
+  final bool isTrip; // 🔥 일상인지 여행인지 구분하는 변수 추가!
 
   Trip({
     required this.title, 
     required this.start, 
     required this.end, 
     required this.places, 
-    required this.path
+    required this.path,
+    this.isTrip = true,
   });
 }
 
@@ -85,7 +86,7 @@ class UltimateTravelEngine {
 
     for (int i = 0; i < photos.length; i++) {
       var p = photos[i];
-      if (!p.hasGps || p.location == null) continue; // 널 방지
+      if (!p.hasGps || p.location == null) continue;
       
       double minDistFromHome = homes.map((h) => _getDist(p.location!, h)).reduce(min);
 
@@ -95,6 +96,9 @@ class UltimateTravelEngine {
         if (minDistFromHome > kHomeRadius || distFromPrev > kDistanceJump) {
           isTraveling = true;
           currentTripPhotos = [p];
+        } else {
+          // 🔥 집에 있을 때 찍은 사진도 버리지 않고 '일상'으로 담기 위해 저장
+          currentTripPhotos.add(p);
         }
       } else {
         int timeGap = p.time.difference(currentTripPhotos.last.time).inHours;
@@ -102,35 +106,38 @@ class UltimateTravelEngine {
         bool isInactive = timeGap >= kTripMaxGapHours;
 
         if (isHomeEntry || isInactive) {
-          var trip = _finalizeTrip(currentTripPhotos);
-          if (trip != null && trip.end.difference(trip.start).inMinutes >= kMinTripStayMinutes) {
-            trips.add(trip);
-          }
+          bool validTrip = currentTripPhotos.length >= 5 && currentTripPhotos.last.time.difference(currentTripPhotos.first.time).inMinutes >= kMinTripStayMinutes;
+          // 🔥 여행 기준 미달이어도 버리지 않고 forceDaily: true로 일상으로 저장
+          var trip = _finalizeTrip(currentTripPhotos, forceDaily: !validTrip);
+          if (trip != null) trips.add(trip);
+          
           isTraveling = false;
-          currentTripPhotos = [];
+          currentTripPhotos = [p]; // 현재 사진부터 다시 수집
         } else {
           currentTripPhotos.add(p);
         }
       }
     }
-    if (isTraveling && currentTripPhotos.length >= 5) {
-      var trip = _finalizeTrip(currentTripPhotos);
+    if (currentTripPhotos.isNotEmpty) {
+      var trip = _finalizeTrip(currentTripPhotos, forceDaily: !isTraveling || currentTripPhotos.length < 5);
       if (trip != null) trips.add(trip);
     }
     return trips;
   }
 
-  Trip? _finalizeTrip(List<RawPhoto> photos) {
+  // 🔥 forceDaily 파라미터 추가하여 일상과 여행의 타이틀 및 플래그 분리
+  Trip? _finalizeTrip(List<RawPhoto> photos, {bool forceDaily = false}) {
     if (photos.isEmpty) return null;
     var places = _clusterPlaces(photos);
     if (places.isEmpty) return null;
 
     return Trip(
-      title: "${photos.first.time.month}/${photos.first.time.day} 여행",
+      title: forceDaily ? "${photos.first.time.month}/${photos.first.time.day} 일상" : "${photos.first.time.month}/${photos.first.time.day} 여행",
       start: photos.first.time,
       end: photos.last.time,
       places: places,
       path: places.map((pl) => pl.centroid).toList(),
+      isTrip: !forceDaily,
     );
   }
 
@@ -154,6 +161,9 @@ class UltimateTravelEngine {
     for (var p in gpsPhotos) {
       if (p.clusterId != null && p.clusterId! > 0) {
         groups.putIfAbsent(p.clusterId!, () => []).add(p);
+      } else if (p.clusterId == -1) {
+        // 🔥 군집화 실패한 낱개 사진도 버리지 않고 개별 장소로 취급
+        groups.putIfAbsent(--currentCid, () => []).add(p);
       }
     }
 
