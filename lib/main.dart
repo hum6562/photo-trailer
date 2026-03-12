@@ -248,7 +248,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.redAccent);
       
       // 텍스트 위치 중앙 정렬
-      textPainter.paint(canvas, Offset(badgeCenter.dx - textPainter.width/2, badgeCenter.hitTestable ? badgeCenter.dy - textPainter.height/2 - 1 : badgeCenter.dy - textPainter.height/2));
+      textPainter.paint(canvas, Offset(badgeCenter.dx - textPainter.width/2, badgeCenter.dy - textPainter.height/2));
     }
 
     final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
