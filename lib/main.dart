@@ -87,30 +87,42 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     List<RawPhoto> rawPhotos = [];
     setState(() { _totalCount = assets.length; });
 
-    for (int i = 0; i < assets.length; i++) {
-      var asset = assets[i];
-      
-      // 전체 불러오기가 아닐 때, 3개월 이전 사진이 나오면 스톱 (사진이 최신순이라는 전제)
-      if (!loadAll && asset.createDateTime.isBefore(threeMonthsAgo)) {
+    // 🔥 여기서부터 100장씩 병렬 처리하는 핵심 로직!
+    int chunkSize = 100;
+
+    for (int i = 0; i < assets.length; i += chunkSize) {
+      // 3개월 이전 사진인지 확인 (현재 묶음의 첫 번째 사진 기준)
+      if (!loadAll && assets[i].createDateTime.isBefore(threeMonthsAgo)) {
         setState(() { _totalCount = i; }); // 실제 처리할 총 장수 수정
         break;
       }
 
-      final loc = await asset.latlngAsync();
-      rawPhotos.add(RawPhoto(
-        id: asset.id,
-        location: (loc != null && loc.latitude != 0) ? LatLng(loc.latitude, loc.longitude) : null,
-        time: asset.createDateTime,
-        width: asset.width.toDouble(),
-        height: asset.height.toDouble(),
-        isFavorite: asset.isFavorite,
-        originalAsset: asset,
-      ));
+      int end = (i + chunkSize < assets.length) ? i + chunkSize : assets.length;
+      var chunk = assets.sublist(i, end);
 
-      // 🔥 UI 렉을 줄이기 위해 20장마다 상태 업데이트
-      if (i % 20 == 0) {
-        setState(() { _processedCount = i + 1; _statusText = "사진 위치 읽는 중..."; });
+      // 🚀 마법의 코드: 100장의 GPS 정보를 '동시에' 물어보고 가져옵니다!
+      var locations = await Future.wait(chunk.map((a) => a.latlngAsync()));
+
+      for (int j = 0; j < chunk.length; j++) {
+        var asset = chunk[j];
+        var loc = locations[j];
+        
+        rawPhotos.add(RawPhoto(
+          id: asset.id,
+          location: (loc != null && loc.latitude != 0) ? LatLng(loc.latitude, loc.longitude) : null,
+          time: asset.createDateTime,
+          width: asset.width.toDouble(),
+          height: asset.height.toDouble(),
+          isFavorite: asset.isFavorite,
+          originalAsset: asset,
+        ));
       }
+
+      // 100장 묶음이 끝날 때마다 화면의 로딩바를 갱신해 줍니다.
+      setState(() { 
+        _processedCount = end; 
+        _statusText = "사진 위치 쾌속으로 읽는 중... ($_processedCount / $_totalCount)"; 
+      });
     }
 
     setState(() { _statusText = "사진 정리 중... (잠시만 기다려주세요)"; });
