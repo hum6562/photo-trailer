@@ -25,8 +25,8 @@ class PhotoMapScreen extends StatefulWidget {
 class _PhotoMapScreenState extends State<PhotoMapScreen> {
   GoogleMapController? _mapController;
   
-  // 🔥 PageController로 변경: 뷰포트를 줄여서 양옆 사진이 살짝 보이게 (필름 효과)
-  final PageController _pageController = PageController(viewportFraction: 0.25);
+  // 🔥 2번 기능: 선택 시점에 초기화하기 위해 nullable로 변경
+  PageController? _pageController;
   int _lastSyncedIndex = -1;
 
   Set<Marker> _markers = {};
@@ -43,22 +43,25 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   @override
   void initState() {
     super.initState();
-    _pageController.addListener(_onPageScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _buildTravelPath(loadAll: false));
   }
 
-  // 🔥 스크롤 시 카메라 동기화
+  @override
+  void dispose() {
+    _pageController?.dispose();
+    super.dispose();
+  }
+
   void _onPageScroll() {
-    if (_selectedTripIndex == null || _isLoading || !_pageController.hasClients) return;
+    if (_selectedTripIndex == null || _isLoading || _pageController == null || !_pageController!.hasClients) return;
     
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
     if (allPhotos.isEmpty) return;
 
-    double page = _pageController.page ?? 0;
+    double page = _pageController!.page ?? 0;
     int currentIndex = page.round().clamp(0, allPhotos.length - 1);
     
-    // 너무 잦은 지도 업데이트 방지
     if (_lastSyncedIndex != currentIndex) {
       _lastSyncedIndex = currentIndex;
       final loc = allPhotos[currentIndex].location;
@@ -127,23 +130,19 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     setState(() { _statusText = "사진 정리 중... (잠시만 기다려주세요)"; });
     final analyzedTrips = await compute(_runAnalysis, rawPhotos);
 
-    // 🔥 여기서 중요도를 계산해서 정렬합니다 (여행 우선, 그 다음 사진 갯수)
     analyzedTrips.sort((a, b) {
-      if (a.isTrip && !b.isTrip) return -1; // 여행 우선
+      if (a.isTrip && !b.isTrip) return -1; 
       if (!a.isTrip && b.isTrip) return 1;
-      return b.totalPhotoCount.compareTo(a.totalPhotoCount); // 장수 많은 순
+      return b.totalPhotoCount.compareTo(a.totalPhotoCount); 
     });
 
     Set<Marker> overviewMarkers = {};
-    
-    // 🔥 화면에 핀이 너무 꽉 차지 않게 상위 15개(여행 위주)만 지도에 표시합니다.
     final displayTrips = analyzedTrips.take(15).toList();
 
     for (int i = 0; i < displayTrips.length; i++) {
       final trip = displayTrips[i];
       if (trip.places.isEmpty) continue;
       
-      // 🔥 첫 장소가 아니라, 사진이 '가장 많은 장소(메인 목적지)'에 핀을 꽂음
       final mainPlace = trip.mainPlace;
       final bestPhoto = mainPlace.representative.originalAsset;
       
@@ -154,7 +153,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           markerId: MarkerId("ov_$i"),
           position: mainPlace.centroid,
           icon: await _getPhotoMarker(bestPhoto, borderColor, count: trip.totalPhotoCount),
-          onTap: () => _onTripSelected(analyzedTrips.indexOf(trip)), // 전체 리스트에서의 인덱스 전달
+          onTap: () => _onTripSelected(analyzedTrips.indexOf(trip)), 
         ));
       }
     }
@@ -173,23 +172,71 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
   static List<Trip> _runAnalysis(List<RawPhoto> photos) => UltimateTravelEngine().segment(photos);
 
+  // 🔥 4번 기능: 두 지점 사이의 각도(방향) 계산
+  double _calculateBearing(LatLng start, LatLng end) {
+    double lat1 = start.latitude * pi / 180;
+    double lon1 = start.longitude * pi / 180;
+    double lat2 = end.latitude * pi / 180;
+    double lon2 = end.longitude * pi / 180;
+
+    double dLon = lon2 - lon1;
+    double y = sin(dLon) * cos(lat2);
+    double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
+    double bearing = atan2(y, x) * 180 / pi;
+    return (bearing + 360) % 360;
+  }
+
+  // 🔥 4번 기능: 진행 방향 화살표 마커 생성 (불투명도 적용)
+  Future<BitmapDescriptor> _getArrowMarker(double opacity) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    const size = 40.0;
+    
+    final paint = Paint()
+      ..color = Colors.white.withOpacity(opacity)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 5.0
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final path = Path()
+      ..moveTo(10, 25)
+      ..lineTo(20, 10)
+      ..lineTo(30, 25);
+      
+    // 그림자
+    canvas.drawPath(path.shift(const Offset(0, 2)), Paint()
+      ..color = Colors.black45.withOpacity(opacity * 0.5)
+      ..style = PaintingStyle.stroke..strokeWidth = 5.0..strokeCap = StrokeCap.round..strokeJoin = StrokeJoin.round);
+    // 화살표 본체
+    canvas.drawPath(path, paint..color = Colors.orangeAccent.withOpacity(opacity));
+
+    final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
+    final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    return BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+  }
+
   Future<void> _onTripSelected(int index) async {
     setState(() { _selectedTripIndex = index; _isLoading = true; });
     
-    // 새 여행을 누르면 파노라마 리스트 위치를 맨 처음(0)으로 초기화
-    if (_pageController.hasClients) {
-      _pageController.jumpToPage(0);
+    final trip = _trips[index];
+    final allPhotos = trip.places.expand((p) => p.photos).toList();
+    
+    // 🔥 2번 기능: 대표 사진의 인덱스를 찾아 그 위치부터 시작
+    int startIndex = 0;
+    final mainAssetId = trip.mainPlace.representative.originalAsset?.id;
+    if (mainAssetId != null) {
+      startIndex = allPhotos.indexWhere((p) => p.originalAsset?.id == mainAssetId);
+      if (startIndex == -1) startIndex = 0;
     }
 
-    final trip = _trips[index];
-    
-    if (trip.isTrip && trip.path.length > 1) {
-      _polylines = { Polyline(polylineId: PolylineId("p$index"), points: trip.path, color: Colors.orange, width: 5) };
-    } else {
-      _polylines = {};
-    }
+    _pageController?.dispose();
+    _pageController = PageController(viewportFraction: 0.25, initialPage: startIndex);
+    _pageController!.addListener(_onPageScroll);
     
     Set<Marker> detailMarkers = {};
+    
+    // 장소 사진 마커 세팅
     for (int i = 0; i < trip.places.length; i++) {
       final asset = trip.places[i].representative.originalAsset;
       if (asset != null) {
@@ -197,8 +244,49 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           markerId: MarkerId("pl$i"),
           position: trip.places[i].centroid,
           icon: await _getPhotoMarker(asset, Colors.white), 
+          zIndex: 2, // 화살표보다 위에 오도록
         ));
       }
+    }
+
+    // 🔥 4번 기능: 루트 표시 및 화살표 추가
+    if (trip.isTrip && trip.path.length > 1) {
+      // 메인 선은 불투명도를 낮게 깔아줍니다
+      _polylines = { 
+        Polyline(
+          polylineId: PolylineId("p$index"), 
+          points: trip.path, 
+          color: Colors.orange.withOpacity(0.4), 
+          width: 5
+        ) 
+      };
+      
+      final engine = UltimateTravelEngine();
+      for (int i = 0; i < trip.path.length - 1; i++) {
+        LatLng p1 = trip.path[i];
+        LatLng p2 = trip.path[i+1];
+        
+        // 거리가 너무 짧으면 화살표 그리지 않음
+        if (engine.getDistance(p1, p2) < 2.0) continue; 
+        
+        double bearing = _calculateBearing(p1, p2);
+        LatLng midPoint = LatLng((p1.latitude + p2.latitude) / 2, (p1.longitude + p2.longitude) / 2);
+        
+        // 다음 사진 방향으로 갈수록 불투명도를 다르게 (선택적)
+        double progress = i / (trip.path.length - 1);
+        double arrowOpacity = 1.0 - (progress * 0.4); // 뒤로 갈수록 살짝 투명해짐
+        
+        detailMarkers.add(Marker(
+          markerId: MarkerId("arrow_$i"),
+          position: midPoint,
+          icon: await _getArrowMarker(arrowOpacity),
+          rotation: bearing, 
+          anchor: const Offset(0.5, 0.5),
+          zIndex: 1, // 사진 밑에 깔림
+        ));
+      }
+    } else {
+      _polylines = {};
     }
 
     setState(() { _markers = detailMarkers; _isLoading = false; });
@@ -218,7 +306,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng));
   }
 
-  // 🔥 count 파라미터 추가하여 우측 상단에 갯수 배지 달기
+  // 🔥 1번 기능: 카톡 알림처럼 배지가 사진 밖으로 튀어나오게 수정
   Future<BitmapDescriptor> _getPhotoMarker(pm.AssetEntity entity, Color borderColor, {int? count}) async {
     final data = await entity.thumbnailDataWithSize(const pm.ThumbnailSize(100, 100));
     if (data == null) return BitmapDescriptor.defaultMarker;
@@ -226,32 +314,37 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final fi = await codec.getNextFrame();
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
-    const size = 60.0; 
     
-    // 사진 그리기
-    canvas.drawCircle(const Offset(size/2, size/2), size/2, Paint()..color = borderColor);
-    canvas.clipPath(Path()..addOval(const Rect.fromLTWH(4, 4, size-8, size-8)));
-    canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(0, 0, size, size), Paint());
+    // 전체 캔버스를 키우고 사진을 좌측 하단으로 밉니다.
+    const double canvasSize = 85.0; 
+    const double photoSize = 60.0; 
+    const double dxOffset = 0.0;
+    const double dyOffset = 20.0; 
     
-    // 🔥 배지 그리기 (count가 있을 때만)
+    canvas.drawCircle(const Offset(photoSize/2 + dxOffset, photoSize/2 + dyOffset), photoSize/2, Paint()..color = borderColor);
+    canvas.clipPath(Path()..addOval(const Rect.fromLTWH(dxOffset + 4, dyOffset + 4, photoSize - 8, photoSize - 8)));
+    canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(dxOffset, dyOffset, photoSize, photoSize), Paint());
+    
+    // 캔버스 우측 상단 모서리에 배지 그리기
     if (count != null && count > 0) {
       String text = count > 99 ? "99+" : count.toString();
       final textPainter = TextPainter(
-        text: TextSpan(text: text, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+        text: TextSpan(text: text, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
         textDirection: TextDirection.ltr,
       );
       textPainter.layout();
       
-      // 빨간색 원 배지
-      double badgeRadius = 12.0;
-      Offset badgeCenter = const Offset(size - 12, 12);
+      double badgeRadius = 13.0;
+      Offset badgeCenter = const Offset(65.0, 15.0); 
+      
+      // 하얀색 테두리 추가
+      canvas.drawCircle(badgeCenter, badgeRadius + 2.5, Paint()..color = Colors.white);
       canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.redAccent);
       
-      // 텍스트 위치 중앙 정렬
       textPainter.paint(canvas, Offset(badgeCenter.dx - textPainter.width/2, badgeCenter.dy - textPainter.height/2));
     }
 
-    final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
+    final img = await recorder.endRecording().toImage(canvasSize.toInt(), canvasSize.toInt());
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
     if (bytes == null) return BitmapDescriptor.defaultMarker;
     return BitmapDescriptor.bytes(bytes.buffer.asUint8List());
@@ -274,7 +367,11 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           
           if (_isLoading) _buildLoadingOverlay(),
           
-          if (_selectedTripIndex != null) Positioned(bottom: 20, left: 0, right: 0, child: _buildTripFilmStrip()),
+          if (_selectedTripIndex != null) ...[
+            Positioned(bottom: 20, left: 0, right: 0, child: _buildTripFilmStrip()),
+            // 🔥 3번 기능: 화면 오른쪽 위로 세로방향 파노라마 스크롤바 추가
+            Positioned(right: 15, top: 100, bottom: 160, width: 55, child: _buildVerticalFastScroller()),
+          ],
         ],
       ),
       floatingActionButton: (_isLoading || _selectedTripIndex != null) ? null : FloatingActionButton.extended(
@@ -316,13 +413,51 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     );
   }
 
-  // 🔥 영화 필름처럼 스르륵 넘어가는 UI (AnimatedBuilder 활용)
+  // 🔥 3번 기능: 3000장도 빠르게 넘길 수 있는 세로 스크롤러 위젯
+  Widget _buildVerticalFastScroller() {
+    final trip = _trips[_selectedTripIndex!];
+    final allPhotos = trip.places.expand((p) => p.photos).toList();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.4), 
+        borderRadius: BorderRadius.circular(30)
+      ),
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        itemCount: allPhotos.length,
+        itemBuilder: (context, idx) {
+          final asset = allPhotos[idx].originalAsset;
+          if (asset == null) return const SizedBox.shrink();
+          
+          return GestureDetector(
+            onTap: () {
+              // 탭하면 하단 뷰와 지도 모두 쾌속 이동
+              _pageController?.animateToPage(idx, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 6),
+              child: ClipOval(
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(60, 60)),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildTripFilmStrip() {
+    if (_pageController == null) return const SizedBox.shrink();
+    
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
     
     return SizedBox(
-      height: 120, // 높이를 작게 줄여서 하단에 깔리게 함
+      height: 120, 
       child: PageView.builder(
         controller: _pageController,
         itemCount: allPhotos.length,
@@ -331,21 +466,18 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           if (asset == null) return const SizedBox.shrink();
 
           return AnimatedBuilder(
-            animation: _pageController,
+            animation: _pageController!,
             builder: (context, child) {
               double value = 1.0;
-              if (_pageController.position.haveDimensions) {
-                value = _pageController.page! - idx;
-                // 멀어질수록 크기를 줄임 (0.7배까지)
+              if (_pageController!.position.haveDimensions) {
+                value = _pageController!.page! - idx;
                 value = (1 - (value.abs() * 0.3)).clamp(0.0, 1.0);
               }
               return Center(
                 child: SizedBox(
-                  // 선택된 건 100, 양옆은 70 정도로 작아짐
                   height: Curves.easeOut.transform(value) * 100,
                   width: Curves.easeOut.transform(value) * 100,
                   child: Opacity(
-                    // 선택된 건 100% 선명, 양옆은 반투명(40%)
                     opacity: value.clamp(0.4, 1.0), 
                     child: child,
                   ),
