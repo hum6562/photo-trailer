@@ -60,13 +60,11 @@ class Trip {
     this.isTrip = true,
   });
 
-  // 🔥 핵심 방문지: 사진이 가장 많이 찍힌 장소를 이 여행의 메인 목적지로 판단!
   Place get mainPlace {
     if (places.isEmpty) throw StateError("No places");
     return places.reduce((a, b) => a.photos.length > b.photos.length ? a : b);
   }
 
-  // 🔥 총 사진 갯수
   int get totalPhotoCount => places.fold(0, (sum, p) => sum + p.photos.length);
 }
 
@@ -97,11 +95,11 @@ class UltimateTravelEngine {
       var p = photos[i];
       if (!p.hasGps || p.location == null) continue;
       
-      double minDistFromHome = homes.map((h) => _getDist(p.location!, h)).reduce(min);
+      double minDistFromHome = homes.map((h) => getDistance(p.location!, h)).reduce(min);
 
       if (!isTraveling) {
         double distFromPrev = i > 0 && photos[i - 1].hasGps && photos[i-1].location != null 
-            ? _getDist(photos[i - 1].location!, p.location!) : 0;
+            ? getDistance(photos[i - 1].location!, p.location!) : 0;
         if (minDistFromHome > kHomeRadius || distFromPrev > kDistanceJump) {
           isTraveling = true;
           currentTripPhotos = [p];
@@ -192,7 +190,7 @@ class UltimateTravelEngine {
     for (int i = 0; i < all.length; i++) {
       if (all[i].location == null) continue;
       if (all[i].time.difference(target.time).inMinutes.abs() <= kPlaceMaxGapMinutes) {
-        if (_getDist(target.location!, all[i].location!) <= kDbscanEps) {
+        if (getDistance(target.location!, all[i].location!) <= kDbscanEps) {
           neighbors.add(i);
         }
       }
@@ -237,7 +235,7 @@ class UltimateTravelEngine {
     for (var p in place.photos) {
       if (p.location == null) { p.score = 0; continue; }
       double res = min((p.width * p.height) / 12000000, 1.0);
-      double spatC = 1.0 / (1.0 + _getDist(p.location!, place.centroid));
+      double spatC = 1.0 / (1.0 + getDistance(p.location!, place.centroid));
       p.score = (res * 0.5) + (spatC * 0.5);
     }
     return place.photos.reduce((a, b) => a.score > b.score ? a : b);
@@ -248,7 +246,8 @@ class UltimateTravelEngine {
     return photos;
   }
 
-  double _getDist(LatLng p1, LatLng p2) {
+  // 🔥 main.dart에서도 쓸 수 있도록 public으로 변경
+  double getDistance(LatLng p1, LatLng p2) {
     var p = 0.017453292519943295;
     var a = 0.5 - cos((p2.latitude - p1.latitude) * p) / 2 + 
         cos(p1.latitude * p) * cos(p2.latitude * p) * (1 - cos((p2.longitude - p1.longitude) * p)) / 2;
