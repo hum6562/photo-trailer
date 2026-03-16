@@ -43,6 +43,10 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   bool _isGlobalLoading = false;
   bool _isTripLoading = false;
   bool _showStatusCard = true; 
+  
+  // 🔥 전체 분석 완료 여부를 추적하는 변수 추가
+  bool _isAllLoaded = false; 
+
   String _statusText = "준비 중...";
   int _processedCount = 0;
   int _totalCount = 0;
@@ -217,6 +221,11 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       _trips = analyzedTrips;
       _isGlobalLoading = false;
       
+      // 🔥 전체 로딩이 실행된 경우 플래그를 true로 변경하여 버튼을 완전히 숨김
+      if (loadAll) {
+        _isAllLoaded = true;
+      }
+      
       int tripCount = _trips.where((t) => t.isTrip).length;
       int dailyCount = _trips.length - tripCount;
       _statusText = "완료! (여행 $tripCount개, 일상 $dailyCount개)";
@@ -353,12 +362,9 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       _filterMarkersByZoom(zoom);
     }
     
-    // 🔥 일상 앨범일 경우 줌아웃 방지 로직 적용
     if (trip.isTrip && trip.path.isNotEmpty) {
-      // 여행(Trip)일 경우 전체 경로가 보이도록 줌 조절
       _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_getBounds(trip.path), 70));
     } else if (!trip.isTrip) {
-      // 일상(Daily)일 경우 줌 레벨은 유지한 채 대표 마커 위치로 부드럽게 화면만 이동
       _mapController?.animateCamera(CameraUpdate.newLatLng(trip.mainPlace.centroid));
     }
   }
@@ -519,7 +525,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           ],
         ],
       ),
-      floatingActionButton: (_isGlobalLoading || _selectedTripIndex != null) ? null : FloatingActionButton.extended(
+      // 🔥 _isAllLoaded 조건이 추가되어 버튼이 영구적으로 사라집니다.
+      floatingActionButton: (_isGlobalLoading || _selectedTripIndex != null || _isAllLoaded) ? null : FloatingActionButton.extended(
         onPressed: () => _buildTravelPath(loadAll: true),
         label: const Text("모든 사진 분석하기"),
         icon: const Icon(Icons.photo_library),
