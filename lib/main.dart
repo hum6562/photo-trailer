@@ -27,7 +27,9 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   
   PageController? _pageController;
   ScrollController? _verticalScrollController;
-  bool _isRightDragging = false; // 🔥 우측 스크롤 드래그 상태 감지
+  
+  // 🔥 우측 스크롤이 사용자에 의해 움직이는지 감지하는 플래그
+  bool _isRightListScrolling = false; 
   
   int _lastSyncedIndex = -1;
 
@@ -61,20 +63,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     super.dispose();
   }
 
-  // 🔥 우측 스크롤을 드래그할 때 -> 하단 PageView 동기화
-  void _onRightScroll() {
-    if (_isRightDragging && _pageController != null && _pageController!.hasClients) {
-      double targetPage = _verticalScrollController!.offset / 60.0;
-      final trip = _trips[_selectedTripIndex!];
-      int totalPhotos = trip.places.fold(0, (sum, p) => sum + p.photos.length);
-      targetPage = targetPage.clamp(0.0, (totalPhotos - 1).toDouble());
-      
-      double pagePixel = targetPage * _pageController!.position.viewportDimension * _pageController!.viewportFraction;
-      _pageController!.position.jumpTo(pagePixel);
-    }
-  }
-
-  // 🔥 하단 PageView가 움직일 때 -> 우측 스크롤 동기화
+  // 하단 PageView가 움직일 때 -> 우측 스크롤 동기화
   void _onPageScroll() {
     if (_selectedTripIndex == null || _isGlobalLoading || _isTripLoading || _pageController == null || !_pageController!.hasClients) return;
     
@@ -84,8 +73,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
     double page = _pageController!.page ?? 0;
     
-    // 유저가 우측 스크롤을 직접 만지고 있지 않을 때만 동기화 (충돌 방지)
-    if (_verticalScrollController != null && _verticalScrollController!.hasClients && !_isRightDragging) {
+    // 유저가 우측 스크롤을 직접 튕기면서 조작 중이 아닐 때만 동기화
+    if (_verticalScrollController != null && _verticalScrollController!.hasClients && !_isRightListScrolling) {
       _verticalScrollController!.jumpTo(page * 60.0);
     }
 
@@ -124,7 +113,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     List<RawPhoto> rawPhotos = [];
     setState(() { _totalCount = assets.length; });
 
-    // 🔥 속도 최적화: 250장씩 병렬 처리
     int chunkSize = 250;
     for (int i = 0; i < assets.length; i += chunkSize) {
       if (!loadAll && assets[i].createDateTime.isBefore(threeMonthsAgo)) {
@@ -177,7 +165,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       final bestPhoto = mainPlace.representative.originalAsset;
       
       if (bestPhoto != null) {
-        Color borderColor = trip.isTrip ? Colors.orangeAccent : Colors.white;
+        // 🔥 여행 사진 테두리 색상을 곤색(Navy)으로 변경
+        Color borderColor = trip.isTrip ? const Color(0xFF1A237E) : Colors.white;
         
         overviewMarkers.add(Marker(
           markerId: MarkerId("ov_$i"),
@@ -214,7 +203,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return (bearing + 360) % 360;
   }
 
-  // 🔥 두 좌표 사이의 실제 거리(미터) 계산 공식 (Haversine)
   double _calcDistanceMeters(LatLng p1, LatLng p2) {
     var R = 6371e3; 
     var phi1 = p1.latitude * pi / 180;
@@ -262,15 +250,12 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
     _lastSyncedIndex = startIndex; 
 
-    // 하단 뷰 컨트롤러 리셋
     _pageController?.dispose();
     _pageController = PageController(viewportFraction: 0.25, initialPage: startIndex);
     _pageController!.addListener(_onPageScroll);
 
-    // 우측 스크롤 컨트롤러 리셋 (해당 인덱스 위치로 초기 세팅)
     _verticalScrollController?.dispose();
     _verticalScrollController = ScrollController(initialScrollOffset: startIndex * 60.0);
-    _verticalScrollController!.addListener(_onRightScroll);
     
     _currentTripPlaceMarkers.clear();
     _currentTripArrowMarkers.clear();
@@ -283,7 +268,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           position: trip.places[i].centroid,
           icon: await _getPhotoMarker(asset, Colors.white), 
           zIndexInt: 2, 
-          // 🔥 기능 추가: 지도에 뜬 마커를 눌러도 하단 & 우측 사진이 해당 사진으로 정중앙 배치됨
           onTap: () {
             int idx = allPhotos.indexWhere((p) => p.originalAsset?.id == asset.id);
             if (idx != -1) {
@@ -329,17 +313,13 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     }
   }
 
-  // 🔥 동적 50% 겹침 방지 필터 알고리즘
   void _filterMarkersByZoom(double zoom) {
     if (_selectedTripIndex == null) return;
     Set<Marker> visibleMarkers = {};
     
-    // 현재 줌 레벨에서 '1픽셀'이 실제 몇 미터인지 계산 (한국 위도 기준 근사치)
     double metersPerPixel = 156543.03 * 0.803 / pow(2, zoom);
-    // 마커 이미지 지름(80px)의 50%인 40픽셀 거리를 한계치로 설정
     double thresholdMeters = 40.0 * metersPerPixel; 
 
-    // 1. 대표 사진 마커 필터링 (겹치면 숨김)
     for (var m in _currentTripPlaceMarkers) {
       bool overlaps = false;
       for (var v in visibleMarkers) {
@@ -351,12 +331,11 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       if (!overlaps) visibleMarkers.add(m);
     }
     
-    // 2. 진행 방향 화살표 마커 필터링
     List<Marker> visibleArrows = [];
     for (var a in _currentTripArrowMarkers) {
       bool overlaps = false;
       for (var v in visibleArrows) {
-        if (_calcDistanceMeters(a.position, v.position) < (thresholdMeters * 0.8)) { // 화살표는 조금 더 촘촘하게
+        if (_calcDistanceMeters(a.position, v.position) < (thresholdMeters * 0.8)) { 
           overlaps = true;
           break;
         }
@@ -395,17 +374,25 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     const double dxOffset = 10.0;
     const double dyOffset = 25.0; 
     
+    // 외곽선 그리기
     canvas.drawCircle(const Offset(photoSize/2 + dxOffset, photoSize/2 + dyOffset), photoSize/2, Paint()..color = borderColor);
     canvas.clipPath(Path()..addOval(const Rect.fromLTWH(dxOffset + 4, dyOffset + 4, photoSize - 8, photoSize - 8)));
     canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(dxOffset, dyOffset, photoSize, photoSize), Paint());
     
+    // 🔥 배지 디자인 변경: 반투명 검은색 배경에 흰색 글씨, 원 바깥쪽으로 살짝 튀어나오게
     if (count != null && count > 0) {
       String text = count > 99 ? "99+" : count.toString();
-      final textPainter = TextPainter(text: TextSpan(text: text, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)), textDirection: TextDirection.ltr)..layout();
+      final textPainter = TextPainter(
+        text: TextSpan(text: text, style: TextStyle(color: Colors.white.withValues(alpha: 0.95), fontSize: 12, fontWeight: FontWeight.bold)), 
+        textDirection: TextDirection.ltr
+      )..layout();
+      
       double badgeRadius = 14.0;
-      Offset badgeCenter = const Offset(75.0, 25.0); 
-      canvas.drawCircle(badgeCenter, badgeRadius + 2.5, Paint()..color = Colors.white);
-      canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.redAccent);
+      Offset badgeCenter = const Offset(70.0, 23.0); // 우측 상단으로 삐져나온 위치
+      
+      // 반투명한 어두운 배경 그려주기
+      canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.black.withValues(alpha: 0.6));
+      
       textPainter.paint(canvas, Offset(badgeCenter.dx - textPainter.width/2, badgeCenter.dy - textPainter.height/2));
     }
 
@@ -482,13 +469,13 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     );
   }
 
-  // 🔥 딱 3장만 보이면서 현재 사진이 무조건 정중앙에 고정되는 쾌속 스크롤바
+  // 🔥 드래그 감지를 알림 기반으로 바꿔서 슬라이드하면 관성으로 쫙 넘어가게 수정
   Widget _buildVerticalFastScroller() {
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
 
     return Container(
-      height: 180, // 아이템(60px) * 3장 = 정확히 180px
+      height: 180, 
       decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(30)),
       child: ShaderMask(
         shaderCallback: (Rect bounds) => const LinearGradient(
@@ -497,17 +484,38 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           stops: [0.0, 0.15, 0.85, 1.0], 
         ).createShader(bounds),
         blendMode: BlendMode.dstIn,
-        child: Listener(
-          onPointerDown: (_) => _isRightDragging = true,
-          onPointerUp: (_) => _isRightDragging = false,
-          onPointerCancel: (_) => _isRightDragging = false,
+        child: NotificationListener<ScrollNotification>(
+          onNotification: (ScrollNotification info) {
+            // 사용자가 화면을 터치해서 스크롤을 시작했을 때만 감지
+            if (info is ScrollStartNotification && info.dragDetails != null) {
+              _isRightListScrolling = true;
+            } 
+            // 쫙쫙 넘기는 중에 하단 뷰와 동기화
+            else if (info is ScrollUpdateNotification && _isRightListScrolling) {
+              double targetPage = info.metrics.pixels / 60.0;
+              targetPage = targetPage.clamp(0.0, (allPhotos.length - 1).toDouble());
+              if (_pageController != null && _pageController!.hasClients) {
+                _pageController!.position.jumpTo(targetPage * _pageController!.position.viewportDimension * _pageController!.viewportFraction);
+              }
+            } 
+            // 스크롤이 끝났을 때 정중앙 뷰에 가장 가까운 사진으로 스냅 처리
+            else if (info is ScrollEndNotification) {
+              if (_isRightListScrolling) {
+                _isRightListScrolling = false;
+                int closestPage = (info.metrics.pixels / 60.0).round();
+                _pageController?.animateToPage(closestPage, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+              }
+            }
+            return false;
+          },
           child: RawScrollbar(
             controller: _verticalScrollController,
             thumbVisibility: true, interactive: true, thickness: 6.0, radius: const Radius.circular(10), thumbColor: Colors.white70,
             child: ListView.builder(
               controller: _verticalScrollController,
-              padding: const EdgeInsets.symmetric(vertical: 60), // 🔥 상하단에 60px 패딩을 주어 첫/마지막 사진도 정중앙에 올 수 있게 세팅
-              itemExtent: 60.0, // 모든 사진의 높이를 60px로 고정하여 수학적 오차 제거
+              physics: const BouncingScrollPhysics(), // 🔥 핵심: 쫙 밀면 관성으로 부드럽게 넘어가게 하는 물리 엔진
+              padding: const EdgeInsets.symmetric(vertical: 60),
+              itemExtent: 60.0, 
               itemCount: allPhotos.length,
               itemBuilder: (context, idx) {
                 final asset = allPhotos[idx].originalAsset;
