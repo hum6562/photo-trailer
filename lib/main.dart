@@ -28,7 +28,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   PageController? _pageController;
   ScrollController? _verticalScrollController;
   
-  // 🔥 우측 스크롤이 사용자에 의해 움직이는지 감지하는 플래그
   bool _isRightListScrolling = false; 
   
   int _lastSyncedIndex = -1;
@@ -63,7 +62,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     super.dispose();
   }
 
-  // 하단 PageView가 움직일 때 -> 우측 스크롤 동기화
   void _onPageScroll() {
     if (_selectedTripIndex == null || _isGlobalLoading || _isTripLoading || _pageController == null || !_pageController!.hasClients) return;
     
@@ -73,7 +71,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
     double page = _pageController!.page ?? 0;
     
-    // 유저가 우측 스크롤을 직접 튕기면서 조작 중이 아닐 때만 동기화
     if (_verticalScrollController != null && _verticalScrollController!.hasClients && !_isRightListScrolling) {
       _verticalScrollController!.jumpTo(page * 60.0);
     }
@@ -165,7 +162,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       final bestPhoto = mainPlace.representative.originalAsset;
       
       if (bestPhoto != null) {
-        // 🔥 여행 사진 테두리 색상을 곤색(Navy)으로 변경
         Color borderColor = trip.isTrip ? const Color(0xFF1A237E) : Colors.white;
         
         overviewMarkers.add(Marker(
@@ -251,7 +247,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     _lastSyncedIndex = startIndex; 
 
     _pageController?.dispose();
-    _pageController = PageController(viewportFraction: 0.25, initialPage: startIndex);
+    _pageController = PageController(viewportFraction: 0.28, initialPage: startIndex); // 화면 꽉 차지 않게 미세 조정
     _pageController!.addListener(_onPageScroll);
 
     _verticalScrollController?.dispose();
@@ -374,12 +370,11 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     const double dxOffset = 10.0;
     const double dyOffset = 25.0; 
     
-    // 외곽선 그리기
     canvas.drawCircle(const Offset(photoSize/2 + dxOffset, photoSize/2 + dyOffset), photoSize/2, Paint()..color = borderColor);
-    canvas.clipPath(Path()..addOval(const Rect.fromLTWH(dxOffset + 4, dyOffset + 4, photoSize - 8, photoSize - 8)));
+    // 🔥 1번 기능: 자르는 영역(clipPath)을 밖으로 조금 더 늘려서 테두리 두께를 절반으로 얇게 만듦 (+4/-8 에서 +2/-4로 변경)
+    canvas.clipPath(Path()..addOval(const Rect.fromLTWH(dxOffset + 2, dyOffset + 2, photoSize - 4, photoSize - 4)));
     canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(dxOffset, dyOffset, photoSize, photoSize), Paint());
     
-    // 🔥 배지 디자인 변경: 반투명 검은색 배경에 흰색 글씨, 원 바깥쪽으로 살짝 튀어나오게
     if (count != null && count > 0) {
       String text = count > 99 ? "99+" : count.toString();
       final textPainter = TextPainter(
@@ -388,11 +383,9 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       )..layout();
       
       double badgeRadius = 14.0;
-      Offset badgeCenter = const Offset(70.0, 23.0); // 우측 상단으로 삐져나온 위치
+      Offset badgeCenter = const Offset(70.0, 23.0); 
       
-      // 반투명한 어두운 배경 그려주기
       canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.black.withValues(alpha: 0.6));
-      
       textPainter.paint(canvas, Offset(badgeCenter.dx - textPainter.width/2, badgeCenter.dy - textPainter.height/2));
     }
 
@@ -469,7 +462,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     );
   }
 
-  // 🔥 드래그 감지를 알림 기반으로 바꿔서 슬라이드하면 관성으로 쫙 넘어가게 수정
   Widget _buildVerticalFastScroller() {
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
@@ -486,11 +478,9 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         blendMode: BlendMode.dstIn,
         child: NotificationListener<ScrollNotification>(
           onNotification: (ScrollNotification info) {
-            // 사용자가 화면을 터치해서 스크롤을 시작했을 때만 감지
             if (info is ScrollStartNotification && info.dragDetails != null) {
               _isRightListScrolling = true;
             } 
-            // 쫙쫙 넘기는 중에 하단 뷰와 동기화
             else if (info is ScrollUpdateNotification && _isRightListScrolling) {
               double targetPage = info.metrics.pixels / 60.0;
               targetPage = targetPage.clamp(0.0, (allPhotos.length - 1).toDouble());
@@ -498,7 +488,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
                 _pageController!.position.jumpTo(targetPage * _pageController!.position.viewportDimension * _pageController!.viewportFraction);
               }
             } 
-            // 스크롤이 끝났을 때 정중앙 뷰에 가장 가까운 사진으로 스냅 처리
             else if (info is ScrollEndNotification) {
               if (_isRightListScrolling) {
                 _isRightListScrolling = false;
@@ -508,31 +497,28 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             }
             return false;
           },
-          child: RawScrollbar(
+          // 🔥 2번 기능: RawScrollbar 제거 (하얀색 썸 막대기 사라지고 스크롤 기능만 유지)
+          child: ListView.builder(
             controller: _verticalScrollController,
-            thumbVisibility: true, interactive: true, thickness: 6.0, radius: const Radius.circular(10), thumbColor: Colors.white70,
-            child: ListView.builder(
-              controller: _verticalScrollController,
-              physics: const BouncingScrollPhysics(), // 🔥 핵심: 쫙 밀면 관성으로 부드럽게 넘어가게 하는 물리 엔진
-              padding: const EdgeInsets.symmetric(vertical: 60),
-              itemExtent: 60.0, 
-              itemCount: allPhotos.length,
-              itemBuilder: (context, idx) {
-                final asset = allPhotos[idx].originalAsset;
-                if (asset == null) return const SizedBox.shrink();
-                
-                return GestureDetector(
-                  onTap: () => _pageController?.animateToPage(idx, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut),
-                  child: SizedBox(
-                    height: 60.0,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                      child: ClipOval(child: AspectRatio(aspectRatio: 1, child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(60, 60)))),
-                    ),
+            physics: const BouncingScrollPhysics(), 
+            padding: const EdgeInsets.symmetric(vertical: 60),
+            itemExtent: 60.0, 
+            itemCount: allPhotos.length,
+            itemBuilder: (context, idx) {
+              final asset = allPhotos[idx].originalAsset;
+              if (asset == null) return const SizedBox.shrink();
+              
+              return GestureDetector(
+                onTap: () => _pageController?.animateToPage(idx, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut),
+                child: SizedBox(
+                  height: 60.0,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    child: ClipOval(child: AspectRatio(aspectRatio: 1, child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(60, 60)))),
                   ),
-                );
-              },
-            ),
+                ),
+              );
+            },
           ),
         ),
       ),
@@ -545,7 +531,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final allPhotos = trip.places.expand((p) => p.photos).toList();
     
     return SizedBox(
-      height: 120, 
+      // 🔥 4번 기능: 가운데 사진이 커질 수 있도록 전체 높이 확보 (120 -> 160)
+      height: 160, 
       child: PageView.builder(
         key: ValueKey(_selectedTripIndex), 
         controller: _pageController,
@@ -559,20 +546,31 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             builder: (context, child) {
               double value = 1.0;
               if (_pageController!.hasClients && _pageController!.positions.length == 1 && _pageController!.position.haveDimensions) {
-                value = _pageController!.page! - idx;
-                value = (1 - (value.abs() * 0.3)).clamp(0.0, 1.0);
+                // 현재 페이지와 카드의 인덱스 차이를 계산
+                double offset = (_pageController!.page! - idx).abs();
+                // 가운데일수록 1.0, 멀어질수록 작아지게 스케일 조정 (0.0 미만 방지)
+                value = (1 - (offset * 0.45)).clamp(0.0, 1.0);
               }
+              
+              // 🔥 4번 기능: 가운데 사진 사이즈 극대화 로직 적용 (최대 145, 최소 80)
+              double size = 80.0 + (65.0 * Curves.easeOut.transform(value));
+              
               return Center(
                 child: SizedBox(
-                  height: Curves.easeOut.transform(value) * 100, width: Curves.easeOut.transform(value) * 100,
+                  height: size, 
+                  width: size,
                   child: Opacity(opacity: value.clamp(0.4, 1.0), child: child),
                 ),
               );
             },
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 5),
-              decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)]),
-              child: ClipRRect(borderRadius: BorderRadius.circular(12), child: AssetEntityImage(asset, fit: BoxFit.cover))
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 8)]),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(15), 
+                // 🔥 3번 기능: 렉 유발 원인 제거! 원본 로딩(isOriginal: true)을 끄고, 400x400 최적화 썸네일로 로딩 속도 비약적 상승
+                child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(400, 400))
+              )
             ),
           );
         },
