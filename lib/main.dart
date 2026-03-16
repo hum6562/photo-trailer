@@ -36,10 +36,18 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   List<Trip> _trips = [];
   int? _selectedTripIndex;
 
-  bool _isLoading = false;
+  // 🔥 로딩 상태 분리 (전체 분석 로딩 vs 개별 여행 진입 로딩)
+  bool _isGlobalLoading = false;
+  bool _isTripLoading = false;
   String _statusText = "준비 중...";
   int _processedCount = 0;
   int _totalCount = 0;
+
+  // 🔥 줌 확대/축소 시 쾌속 렌더링을 위한 마커/아이콘 캐시
+  final Map<String, BitmapDescriptor> _photoIconCache = {};
+  final Map<int, BitmapDescriptor> _arrowIconCache = {};
+  List<Marker> _currentTripPlaceMarkers = [];
+  List<Marker> _currentTripArrowMarkers = [];
 
   @override
   void initState() {
@@ -55,7 +63,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   }
 
   void _onPageScroll() {
-    if (_selectedTripIndex == null || _isLoading || _pageController == null || !_pageController!.hasClients) return;
+    if (_selectedTripIndex == null || _isGlobalLoading || _isTripLoading || _pageController == null || !_pageController!.hasClients) return;
     
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
@@ -75,7 +83,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
   Future<void> _buildTravelPath({required bool loadAll}) async {
     setState(() { 
-      _isLoading = true; 
+      _isGlobalLoading = true; 
       _statusText = loadAll ? "모든 사진 불러오는 중..." : "최근 3개월 사진 불러오는 중..."; 
       _processedCount = 0;
       _totalCount = 0;
@@ -83,7 +91,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
     final pm.PermissionState ps = await pm.PhotoManager.requestPermissionExtend();
     if (!ps.isAuth && !ps.hasAccess) {
-      setState(() => _isLoading = false);
+      setState(() => _isGlobalLoading = false);
       return;
     }
 
@@ -164,7 +172,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       _trips = analyzedTrips;
       _allTripMarkers = overviewMarkers;
       _markers = overviewMarkers;
-      _isLoading = false;
+      _isGlobalLoading = false;
       
       int tripCount = _trips.where((t) => t.isTrip).length;
       int dailyCount = _trips.length - tripCount;
@@ -187,8 +195,10 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return (bearing + 360) % 360;
   }
 
-  // 🔥 수정: withOpacity 대신 withValues(alpha: ...) 사용
   Future<BitmapDescriptor> _getArrowMarker(double opacity) async {
+    int cacheKey = (opacity * 10).round();
+    if (_arrowIconCache.containsKey(cacheKey)) return _arrowIconCache[cacheKey]!;
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     const size = 40.0;
@@ -201,12 +211,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       ..strokeJoin = StrokeJoin.round;
 
     final path = Path()
-      ..moveTo(10, 22)
-      ..lineTo(20, 8)
-      ..lineTo(30, 22)
-      ..moveTo(10, 32)
-      ..lineTo(20, 18)
-      ..lineTo(30, 32);
+      ..moveTo(10, 22)..lineTo(20, 8)..lineTo(30, 22)
+      ..moveTo(10, 32)..lineTo(20, 18)..lineTo(30, 32);
       
     canvas.drawPath(path.shift(const Offset(0, 2)), Paint()
       ..color = Colors.black45.withValues(alpha: opacity * 0.5)
@@ -215,11 +221,14 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
     final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+    
+    final marker = BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+    _arrowIconCache[cacheKey] = marker;
+    return marker;
   }
 
   Future<void> _onTripSelected(int index) async {
-    setState(() { _selectedTripIndex = index; _isLoading = true; });
+    setState(() { _selectedTripIndex = index; _isTripLoading = true; _markers = {}; _polylines = {}; });
     
     final trip = _trips[index];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
@@ -237,28 +246,26 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     _pageController = PageController(viewportFraction: 0.25, initialPage: startIndex);
     _pageController!.addListener(_onPageScroll);
     
-    Set<Marker> detailMarkers = {};
+    _currentTripPlaceMarkers.clear();
+    _currentTripArrowMarkers.clear();
     
+    // 장소(사진) 마커 생성 및 저장
     for (int i = 0; i < trip.places.length; i++) {
       final asset = trip.places[i].representative.originalAsset;
       if (asset != null) {
-        detailMarkers.add(Marker(
+        _currentTripPlaceMarkers.add(Marker(
           markerId: MarkerId("pl$i"),
           position: trip.places[i].centroid,
           icon: await _getPhotoMarker(asset, Colors.white), 
-          zIndexInt: 2, // 🔥 수정: zIndex 대신 zIndexInt 사용
+          zIndexInt: 2, 
         ));
       }
     }
 
+    // 경로 및 화살표 생성
     if (trip.isTrip && trip.path.length > 1) {
       _polylines = { 
-        Polyline(
-          polylineId: PolylineId("p$index"), 
-          points: trip.path, 
-          color: Colors.orange.withValues(alpha: 0.4), // 🔥 수정: withOpacity 대신 withValues 사용
-          width: 5
-        ) 
+        Polyline(polylineId: PolylineId("p$index"), points: trip.path, color: Colors.orange.withValues(alpha: 0.4), width: 5) 
       };
       
       final engine = UltimateTravelEngine();
@@ -270,27 +277,64 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         
         double bearing = _calculateBearing(p1, p2);
         LatLng midPoint = LatLng((p1.latitude + p2.latitude) / 2, (p1.longitude + p2.longitude) / 2);
-        
         double progress = i / (trip.path.length - 1);
         double arrowOpacity = 1.0 - (progress * 0.5); 
         
-        detailMarkers.add(Marker(
+        _currentTripArrowMarkers.add(Marker(
           markerId: MarkerId("arrow_$i"),
           position: midPoint,
           icon: await _getArrowMarker(arrowOpacity.clamp(0.2, 1.0)),
           rotation: bearing, 
           anchor: const Offset(0.5, 0.5),
-          zIndexInt: 1, // 🔥 수정: zIndex 대신 zIndexInt 사용
+          zIndexInt: 1, 
         ));
       }
-    } else {
-      _polylines = {};
     }
 
-    setState(() { _markers = detailMarkers; _isLoading = false; });
+    setState(() { _isTripLoading = false; });
+    
+    // 🔥 초기 뷰에서는 줌 레벨 10을 기준으로 약 10개의 마커만 띄움
+    _filterMarkersByZoom(10.0);
+    
     if (trip.path.isNotEmpty) {
       _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_getBounds(trip.path), 70));
     }
+  }
+
+  // 🔥 줌 확대/축소에 따라 화면에 보이는 사진 갯수를 조절하는 핵심 로직
+  void _filterMarkersByZoom(double zoom) {
+    if (_selectedTripIndex == null) return;
+    
+    Set<Marker> visibleMarkers = {};
+    
+    // 줌 레벨에 따라 보여줄 목표 개수 설정 (확대할수록 늘어남)
+    int targetPlaces = 8;
+    int targetArrows = 10;
+    
+    if (zoom >= 11.0) { targetPlaces = 15; targetArrows = 20; }
+    if (zoom >= 13.0) { targetPlaces = 30; targetArrows = 40; }
+    if (zoom >= 15.0) { targetPlaces = 999; targetArrows = 999; } // 완전히 확대하면 모두 표시
+
+    if (_currentTripPlaceMarkers.isNotEmpty) {
+      int pStep = max(1, _currentTripPlaceMarkers.length ~/ targetPlaces);
+      for (int i = 0; i < _currentTripPlaceMarkers.length; i++) {
+        // 일정한 간격(step)으로 마커를 뽑거나 마지막 마커는 반드시 포함
+        if (i % pStep == 0 || i == _currentTripPlaceMarkers.length - 1) {
+          visibleMarkers.add(_currentTripPlaceMarkers[i]);
+        }
+      }
+    }
+    
+    if (_currentTripArrowMarkers.isNotEmpty) {
+      int aStep = max(1, _currentTripArrowMarkers.length ~/ targetArrows);
+      for (int i = 0; i < _currentTripArrowMarkers.length; i++) {
+        if (i % aStep == 0 || i == _currentTripArrowMarkers.length - 1) {
+          visibleMarkers.add(_currentTripArrowMarkers[i]);
+        }
+      }
+    }
+    
+    setState(() { _markers = visibleMarkers; });
   }
 
   LatLngBounds _getBounds(List<LatLng> points) {
@@ -305,6 +349,9 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   }
 
   Future<BitmapDescriptor> _getPhotoMarker(pm.AssetEntity entity, Color borderColor, {int? count}) async {
+    final String cacheKey = "${entity.id}_${count ?? 0}";
+    if (_photoIconCache.containsKey(cacheKey)) return _photoIconCache[cacheKey]!;
+
     final data = await entity.thumbnailDataWithSize(const pm.ThumbnailSize(100, 100));
     if (data == null) return BitmapDescriptor.defaultMarker;
     final codec = await ui.instantiateImageCodec(data);
@@ -341,7 +388,10 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final img = await recorder.endRecording().toImage(canvasSize.toInt(), canvasSize.toInt());
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
     if (bytes == null) return BitmapDescriptor.defaultMarker;
-    return BitmapDescriptor.bytes(bytes.buffer.asUint8List());
+    
+    final marker = BitmapDescriptor.bytes(bytes.buffer.asUint8List());
+    _photoIconCache[cacheKey] = marker;
+    return marker;
   }
 
   @override
@@ -355,19 +405,39 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             onMapCreated: (c) => _mapController = c,
             markers: _markers,
             polylines: _polylines,
+            // 🔥 지도를 움직이고 멈췄을 때 줌 레벨을 확인해서 마커 개수 재조정
+            onCameraIdle: () async {
+              if (_selectedTripIndex != null && _mapController != null) {
+                double zoom = await _mapController!.getZoomLevel();
+                _filterMarkersByZoom(zoom);
+              }
+            },
             onTap: (_) { setState(() { _selectedTripIndex = null; _markers = _allTripMarkers; _polylines = {}; }); },
           ),
           Positioned(top: 20, left: 20, right: 20, child: _buildStatusCard()),
           
-          if (_isLoading) _buildLoadingOverlay(),
+          // 🔥 1번 기능: 상단 심플 로딩 바 (여행 선택 시에만)
+          if (_isTripLoading) 
+            Positioned(
+              top: 0, left: 0, right: 0, 
+              child: LinearProgressIndicator(
+                backgroundColor: Colors.transparent, 
+                color: Colors.orangeAccent, 
+                minHeight: 5
+              )
+            ),
+          
+          // 초기 전체 분석 때만 큰 검은색 로딩창 띄움
+          if (_isGlobalLoading) _buildLoadingOverlay(),
           
           if (_selectedTripIndex != null) ...[
             Positioned(bottom: 20, left: 0, right: 0, child: _buildTripFilmStrip()),
-            Positioned(right: 15, top: 100, bottom: 160, width: 60, child: _buildVerticalFastScroller()),
+            // 🔥 2번 기능: 오른쪽 스크롤바 높이 줄이고 배치 조정
+            Positioned(right: 15, top: 90, width: 60, child: _buildVerticalFastScroller()),
           ],
         ],
       ),
-      floatingActionButton: (_isLoading || _selectedTripIndex != null) ? null : FloatingActionButton.extended(
+      floatingActionButton: (_isGlobalLoading || _selectedTripIndex != null) ? null : FloatingActionButton.extended(
         onPressed: () => _buildTravelPath(loadAll: true),
         label: const Text("모든 사진 분석하기"),
         icon: const Icon(Icons.photo_library),
@@ -378,7 +448,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
   Widget _buildStatusCard() => Container(
     padding: const EdgeInsets.all(12),
-    decoration: BoxDecoration(color: Colors.white.withAlpha(230), borderRadius: BorderRadius.circular(30), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]),
+    decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(30), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]),
     child: Text(_statusText, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold)),
   );
 
@@ -406,45 +476,58 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     );
   }
 
+  // 🔥 2번 기능: 높이를 줄이고 위/아래 가장자리를 투명하게(Gradient) 날려주는 쉐이더 적용
   Widget _buildVerticalFastScroller() {
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
 
     return Container(
+      height: 360, // 사진이 딱 5장 정도만 노출되도록 제한
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.5), // 🔥 수정: withOpacity 대신 withValues 사용
+        color: Colors.black.withValues(alpha: 0.5), 
         borderRadius: BorderRadius.circular(30)
       ),
-      child: RawScrollbar(
-        controller: _verticalScrollController,
-        thumbVisibility: true,
-        interactive: true, 
-        thickness: 6.0,
-        radius: const Radius.circular(10),
-        thumbColor: Colors.white70,
-        child: ListView.builder(
+      child: ShaderMask(
+        shaderCallback: (Rect bounds) {
+          return const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.transparent, Colors.white, Colors.white, Colors.transparent],
+            stops: [0.0, 0.15, 0.85, 1.0], // 위/아래 끝부분 15% 영역을 서서히 투명하게
+          ).createShader(bounds);
+        },
+        blendMode: BlendMode.dstIn,
+        child: RawScrollbar(
           controller: _verticalScrollController,
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          itemCount: allPhotos.length,
-          itemBuilder: (context, idx) {
-            final asset = allPhotos[idx].originalAsset;
-            if (asset == null) return const SizedBox.shrink();
-            
-            return GestureDetector(
-              onTap: () {
-                _pageController?.animateToPage(idx, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
-              },
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                child: ClipOval(
-                  child: AspectRatio(
-                    aspectRatio: 1,
-                    child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(60, 60)),
+          thumbVisibility: true,
+          interactive: true, 
+          thickness: 6.0,
+          radius: const Radius.circular(10),
+          thumbColor: Colors.white70,
+          child: ListView.builder(
+            controller: _verticalScrollController,
+            padding: const EdgeInsets.symmetric(vertical: 25), // 쉐이더 영역만큼 패딩
+            itemCount: allPhotos.length,
+            itemBuilder: (context, idx) {
+              final asset = allPhotos[idx].originalAsset;
+              if (asset == null) return const SizedBox.shrink();
+              
+              return GestureDetector(
+                onTap: () {
+                  _pageController?.animateToPage(idx, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                  child: ClipOval(
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(60, 60)),
+                    ),
                   ),
                 ),
-              ),
-            );
-          },
+              );
+            },
+          ),
         ),
       ),
     );
