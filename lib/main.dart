@@ -5,8 +5,8 @@ import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'dart:ui' as ui;
 import 'dart:math';
-import 'dart:convert'; // 🔥 캐시 데이터를 문자열로 변환하기 위해 추가
-import 'package:shared_preferences/shared_preferences.dart'; // 🔥 로컬 저장소 패키지 추가
+import 'dart:convert'; 
+import 'package:shared_preferences/shared_preferences.dart'; 
 
 import 'services/trip_logic.dart'; 
 
@@ -111,7 +111,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final assets = await albums[0].getAssetListRange(start: 0, end: fetchCount);
     DateTime threeMonthsAgo = DateTime.now().subtract(const Duration(days: 90));
 
-    // 🔥 1. 로컬 캐시 메모리로 불러오기
     setState(() { _statusText = "로컬 캐시 데이터 확인 중..."; });
     final prefs = await SharedPreferences.getInstance();
     final String? cachedString = prefs.getString('photo_location_cache');
@@ -131,13 +130,12 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       int end = (i + chunkSize < assets.length) ? i + chunkSize : assets.length;
       var chunk = assets.sublist(i, end);
       
-      // 🔥 2. 캐시에 없는 사진만 선별하여 위치 정보 요청 (핵심 최적화)
       List<Future<pm.LatLng?>> fetchTasks = [];
       for (var asset in chunk) {
         if (!locationCache.containsKey(asset.id)) {
-          fetchTasks.add(asset.latlngAsync()); // 캐시에 없으면 OS에 요청
+          fetchTasks.add(asset.latlngAsync());
         } else {
-          fetchTasks.add(Future.value(null)); // 이미 캐시에 있으면 대기 생략 (0.001초 컷)
+          fetchTasks.add(Future.value(null));
         }
       }
 
@@ -147,7 +145,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         var asset = chunk[j];
         LatLng? parsedLoc;
 
-        // 🔥 3. 위치 정보 할당 (캐시 우선, 없으면 새로 저장)
         if (locationCache.containsKey(asset.id)) {
           var cLoc = locationCache[asset.id];
           if (cLoc != null) {
@@ -157,10 +154,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           var loc = fetchedLocations[j];
           if (loc != null && loc.latitude != 0) {
             parsedLoc = LatLng(loc.latitude, loc.longitude);
-            // 새로운 데이터는 캐시 맵에 추가 [위도, 경도]
             locationCache[asset.id] = [loc.latitude, loc.longitude];
           } else {
-            // 위치가 아예 없는 사진도 null로 캐싱하여 다음번에 다시 요청하지 않게 차단
             locationCache[asset.id] = null;
           }
           isCacheUpdated = true;
@@ -183,7 +178,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       });
     }
 
-    // 🔥 4. 새로 발견된 사진이 있어 캐시가 갱신되었다면 로컬 저장소에 영구 저장
     if (isCacheUpdated) {
       setState(() { _statusText = "위치 캐시 데이터 저장 중..."; });
       await prefs.setString('photo_location_cache', jsonEncode(locationCache));
@@ -359,8 +353,13 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       _filterMarkersByZoom(zoom);
     }
     
-    if (trip.path.isNotEmpty) {
+    // 🔥 일상 앨범일 경우 줌아웃 방지 로직 적용
+    if (trip.isTrip && trip.path.isNotEmpty) {
+      // 여행(Trip)일 경우 전체 경로가 보이도록 줌 조절
       _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_getBounds(trip.path), 70));
+    } else if (!trip.isTrip) {
+      // 일상(Daily)일 경우 줌 레벨은 유지한 채 대표 마커 위치로 부드럽게 화면만 이동
+      _mapController?.animateCamera(CameraUpdate.newLatLng(trip.mainPlace.centroid));
     }
   }
 
