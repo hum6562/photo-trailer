@@ -46,8 +46,8 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   // 🔥 줌 확대/축소 시 쾌속 렌더링을 위한 마커/아이콘 캐시
   final Map<String, BitmapDescriptor> _photoIconCache = {};
   final Map<int, BitmapDescriptor> _arrowIconCache = {};
-  List<Marker> _currentTripPlaceMarkers = [];
-  List<Marker> _currentTripArrowMarkers = [];
+  final List<Marker> _currentTripPlaceMarkers = [];
+  final List<Marker> _currentTripArrowMarkers = [];
 
   @override
   void initState() {
