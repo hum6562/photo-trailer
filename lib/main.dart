@@ -5,6 +5,8 @@ import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'dart:ui' as ui;
 import 'dart:math';
+import 'dart:convert'; // 🔥 캐시 데이터를 문자열로 변환하기 위해 추가
+import 'package:shared_preferences/shared_preferences.dart'; // 🔥 로컬 저장소 패키지 추가
 
 import 'services/trip_logic.dart'; 
 
@@ -29,17 +31,18 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   ScrollController? _verticalScrollController;
   
   bool _isRightListScrolling = false; 
-  
   int _lastSyncedIndex = -1;
 
   Set<Marker> _markers = {};
-  Set<Marker> _allTripMarkers = {}; 
+  List<Marker> _rawOverviewMarkers = []; 
+  
   Set<Polyline> _polylines = {};
   List<Trip> _trips = [];
   int? _selectedTripIndex;
 
   bool _isGlobalLoading = false;
   bool _isTripLoading = false;
+  bool _showStatusCard = true; 
   String _statusText = "준비 중...";
   int _processedCount = 0;
   int _totalCount = 0;
@@ -89,6 +92,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   Future<void> _buildTravelPath({required bool loadAll}) async {
     setState(() { 
       _isGlobalLoading = true; 
+      _showStatusCard = true;
       _statusText = loadAll ? "모든 사진 불러오는 중..." : "최근 3개월 사진 불러오는 중..."; 
       _processedCount = 0;
       _totalCount = 0;
@@ -107,6 +111,13 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final assets = await albums[0].getAssetListRange(start: 0, end: fetchCount);
     DateTime threeMonthsAgo = DateTime.now().subtract(const Duration(days: 90));
 
+    // 🔥 1. 로컬 캐시 메모리로 불러오기
+    setState(() { _statusText = "로컬 캐시 데이터 확인 중..."; });
+    final prefs = await SharedPreferences.getInstance();
+    final String? cachedString = prefs.getString('photo_location_cache');
+    Map<String, dynamic> locationCache = cachedString != null ? jsonDecode(cachedString) : {};
+    bool isCacheUpdated = false;
+
     List<RawPhoto> rawPhotos = [];
     setState(() { _totalCount = assets.length; });
 
@@ -119,15 +130,45 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
       int end = (i + chunkSize < assets.length) ? i + chunkSize : assets.length;
       var chunk = assets.sublist(i, end);
-      var locations = await Future.wait(chunk.map((a) => a.latlngAsync()));
+      
+      // 🔥 2. 캐시에 없는 사진만 선별하여 위치 정보 요청 (핵심 최적화)
+      List<Future<pm.LatLng?>> fetchTasks = [];
+      for (var asset in chunk) {
+        if (!locationCache.containsKey(asset.id)) {
+          fetchTasks.add(asset.latlngAsync()); // 캐시에 없으면 OS에 요청
+        } else {
+          fetchTasks.add(Future.value(null)); // 이미 캐시에 있으면 대기 생략 (0.001초 컷)
+        }
+      }
+
+      var fetchedLocations = await Future.wait(fetchTasks);
 
       for (int j = 0; j < chunk.length; j++) {
         var asset = chunk[j];
-        var loc = locations[j];
-        
+        LatLng? parsedLoc;
+
+        // 🔥 3. 위치 정보 할당 (캐시 우선, 없으면 새로 저장)
+        if (locationCache.containsKey(asset.id)) {
+          var cLoc = locationCache[asset.id];
+          if (cLoc != null) {
+            parsedLoc = LatLng(cLoc[0], cLoc[1]);
+          }
+        } else {
+          var loc = fetchedLocations[j];
+          if (loc != null && loc.latitude != 0) {
+            parsedLoc = LatLng(loc.latitude, loc.longitude);
+            // 새로운 데이터는 캐시 맵에 추가 [위도, 경도]
+            locationCache[asset.id] = [loc.latitude, loc.longitude];
+          } else {
+            // 위치가 아예 없는 사진도 null로 캐싱하여 다음번에 다시 요청하지 않게 차단
+            locationCache[asset.id] = null;
+          }
+          isCacheUpdated = true;
+        }
+
         rawPhotos.add(RawPhoto(
           id: asset.id,
-          location: (loc != null && loc.latitude != 0) ? LatLng(loc.latitude, loc.longitude) : null,
+          location: parsedLoc,
           time: asset.createDateTime,
           width: asset.width.toDouble(),
           height: asset.height.toDouble(),
@@ -138,8 +179,14 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
 
       setState(() { 
         _processedCount = end; 
-        _statusText = "사진 위치 쾌속으로 읽는 중... ($_processedCount / $_totalCount)"; 
+        _statusText = "사진 쾌속 로딩 중... ($_processedCount / $_totalCount)"; 
       });
+    }
+
+    // 🔥 4. 새로 발견된 사진이 있어 캐시가 갱신되었다면 로컬 저장소에 영구 저장
+    if (isCacheUpdated) {
+      setState(() { _statusText = "위치 캐시 데이터 저장 중..."; });
+      await prefs.setString('photo_location_cache', jsonEncode(locationCache));
     }
 
     setState(() { _statusText = "사진 정리 중... (잠시만 기다려주세요)"; });
@@ -151,37 +198,41 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       return b.totalPhotoCount.compareTo(a.totalPhotoCount); 
     });
 
-    Set<Marker> overviewMarkers = {};
-    final displayTrips = analyzedTrips.take(15).toList();
+    _rawOverviewMarkers.clear();
 
-    for (int i = 0; i < displayTrips.length; i++) {
-      final trip = displayTrips[i];
+    for (int i = 0; i < analyzedTrips.length; i++) {
+      final trip = analyzedTrips[i];
       if (trip.places.isEmpty) continue;
       
       final mainPlace = trip.mainPlace;
       final bestPhoto = mainPlace.representative.originalAsset;
       
       if (bestPhoto != null) {
-        Color borderColor = trip.isTrip ? const Color(0xFF1A237E) : Colors.white;
+        Color borderColor = trip.isTrip ? const Color(0xFF1A237E) : const Color(0xFF00897B);
         
-        overviewMarkers.add(Marker(
+        _rawOverviewMarkers.add(Marker(
           markerId: MarkerId("ov_$i"),
           position: mainPlace.centroid,
           icon: await _getPhotoMarker(bestPhoto, borderColor, count: trip.totalPhotoCount),
-          onTap: () => _onTripSelected(analyzedTrips.indexOf(trip)), 
+          onTap: () => _onTripSelected(i), 
         ));
       }
     }
 
     setState(() {
       _trips = analyzedTrips;
-      _allTripMarkers = overviewMarkers;
-      _markers = overviewMarkers;
       _isGlobalLoading = false;
       
       int tripCount = _trips.where((t) => t.isTrip).length;
       int dailyCount = _trips.length - tripCount;
       _statusText = "완료! (여행 $tripCount개, 일상 $dailyCount개)";
+    });
+
+    double initialZoom = _mapController != null ? await _mapController!.getZoomLevel() : 6.5;
+    _filterOverviewMarkersByZoom(initialZoom);
+
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _showStatusCard = false);
     });
   }
 
@@ -247,7 +298,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     _lastSyncedIndex = startIndex; 
 
     _pageController?.dispose();
-    _pageController = PageController(viewportFraction: 0.28, initialPage: startIndex); // 화면 꽉 차지 않게 미세 조정
+    _pageController = PageController(viewportFraction: 0.28, initialPage: startIndex);
     _pageController!.addListener(_onPageScroll);
 
     _verticalScrollController?.dispose();
@@ -302,11 +353,34 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     }
 
     setState(() { _isTripLoading = false; });
-    _filterMarkersByZoom(10.0);
+    
+    if (_mapController != null) {
+      double zoom = await _mapController!.getZoomLevel();
+      _filterMarkersByZoom(zoom);
+    }
     
     if (trip.path.isNotEmpty) {
       _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_getBounds(trip.path), 70));
     }
+  }
+
+  void _filterOverviewMarkersByZoom(double zoom) {
+    Set<Marker> visibleMarkers = {};
+    double metersPerPixel = 156543.03 * 0.803 / pow(2, zoom);
+    double thresholdMeters = 50.0 * metersPerPixel; 
+
+    for (var m in _rawOverviewMarkers) {
+      bool overlaps = false;
+      for (var v in visibleMarkers) {
+        if (_calcDistanceMeters(m.position, v.position) < thresholdMeters) {
+          overlaps = true;
+          break;
+        }
+      }
+      if (!overlaps) visibleMarkers.add(m);
+    }
+    
+    setState(() { _markers = visibleMarkers; });
   }
 
   void _filterMarkersByZoom(double zoom) {
@@ -371,7 +445,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     const double dyOffset = 25.0; 
     
     canvas.drawCircle(const Offset(photoSize/2 + dxOffset, photoSize/2 + dyOffset), photoSize/2, Paint()..color = borderColor);
-    // 🔥 1번 기능: 자르는 영역(clipPath)을 밖으로 조금 더 늘려서 테두리 두께를 절반으로 얇게 만듦 (+4/-8 에서 +2/-4로 변경)
     canvas.clipPath(Path()..addOval(const Rect.fromLTWH(dxOffset + 2, dyOffset + 2, photoSize - 4, photoSize - 4)));
     canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(dxOffset, dyOffset, photoSize, photoSize), Paint());
     
@@ -408,14 +481,34 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             markers: _markers,
             polylines: _polylines,
             onCameraIdle: () async {
-              if (_selectedTripIndex != null && _mapController != null) {
+              if (_mapController != null) {
                 double zoom = await _mapController!.getZoomLevel();
-                _filterMarkersByZoom(zoom);
+                if (_selectedTripIndex != null) {
+                  _filterMarkersByZoom(zoom);
+                } else {
+                  _filterOverviewMarkersByZoom(zoom);
+                }
               }
             },
-            onTap: (_) { setState(() { _selectedTripIndex = null; _markers = _allTripMarkers; _polylines = {}; }); },
+            onTap: (_) async { 
+              setState(() { _selectedTripIndex = null; _polylines = {}; }); 
+              if (_mapController != null) {
+                double zoom = await _mapController!.getZoomLevel();
+                _filterOverviewMarkersByZoom(zoom);
+              }
+            },
           ),
-          Positioned(top: 20, left: 20, right: 20, child: _buildStatusCard()),
+          
+          Positioned(
+            top: 20, left: 20, right: 20, 
+            child: IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: _showStatusCard ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 600),
+                child: _buildStatusCard(),
+              ),
+            ),
+          ),
           
           if (_isTripLoading) 
             Positioned(top: 0, left: 0, right: 0, child: LinearProgressIndicator(backgroundColor: Colors.transparent, color: Colors.orangeAccent, minHeight: 5)),
@@ -497,7 +590,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             }
             return false;
           },
-          // 🔥 2번 기능: RawScrollbar 제거 (하얀색 썸 막대기 사라지고 스크롤 기능만 유지)
           child: ListView.builder(
             controller: _verticalScrollController,
             physics: const BouncingScrollPhysics(), 
@@ -531,7 +623,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final allPhotos = trip.places.expand((p) => p.photos).toList();
     
     return SizedBox(
-      // 🔥 4번 기능: 가운데 사진이 커질 수 있도록 전체 높이 확보 (120 -> 160)
       height: 160, 
       child: PageView.builder(
         key: ValueKey(_selectedTripIndex), 
@@ -546,14 +637,11 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             builder: (context, child) {
               double value = 1.0;
               if (_pageController!.hasClients && _pageController!.positions.length == 1 && _pageController!.position.haveDimensions) {
-                // 현재 페이지와 카드의 인덱스 차이를 계산
                 double offset = (_pageController!.page! - idx).abs();
-                // 가운데일수록 1.0, 멀어질수록 작아지게 스케일 조정 (0.0 미만 방지)
-                value = (1 - (offset * 0.45)).clamp(0.0, 1.0);
+                value = (1 - (offset * 0.6)).clamp(0.0, 1.0);
               }
               
-              // 🔥 4번 기능: 가운데 사진 사이즈 극대화 로직 적용 (최대 145, 최소 80)
-              double size = 80.0 + (65.0 * Curves.easeOut.transform(value));
+              double size = 60.0 + (100.0 * Curves.easeOut.transform(value));
               
               return Center(
                 child: SizedBox(
@@ -568,7 +656,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
               decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 8)]),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(15), 
-                // 🔥 3번 기능: 렉 유발 원인 제거! 원본 로딩(isOriginal: true)을 끄고, 400x400 최적화 썸네일로 로딩 속도 비약적 상승
                 child: AssetEntityImage(asset, fit: BoxFit.cover, isOriginal: false, thumbnailSize: const pm.ThumbnailSize(400, 400))
               )
             ),
