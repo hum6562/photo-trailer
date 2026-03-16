@@ -26,7 +26,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   GoogleMapController? _mapController;
   
   PageController? _pageController;
-  // 🔥 3번 기능: 쾌속 스크롤을 위한 세로 스크롤 컨트롤러 추가
   final ScrollController _verticalScrollController = ScrollController();
   
   int _lastSyncedIndex = -1;
@@ -188,14 +187,14 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return (bearing + 360) % 360;
   }
 
-  // 🔥 4번 기능: 겹화살표(chevron) 모양으로 다음 진행방향 표시
+  // 🔥 수정: withOpacity 대신 withValues(alpha: ...) 사용
   Future<BitmapDescriptor> _getArrowMarker(double opacity) async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     const size = 40.0;
     
     final paint = Paint()
-      ..color = Colors.white.withOpacity(opacity)
+      ..color = Colors.white.withValues(alpha: opacity)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 4.0
       ..strokeCap = StrokeCap.round
@@ -210,9 +209,9 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       ..lineTo(30, 32);
       
     canvas.drawPath(path.shift(const Offset(0, 2)), Paint()
-      ..color = Colors.black45.withOpacity(opacity * 0.5)
+      ..color = Colors.black45.withValues(alpha: opacity * 0.5)
       ..style = PaintingStyle.stroke..strokeWidth = 4.0..strokeCap = StrokeCap.round..strokeJoin = StrokeJoin.round);
-    canvas.drawPath(path, paint..color = Colors.orangeAccent.withOpacity(opacity));
+    canvas.drawPath(path, paint..color = Colors.orangeAccent.withValues(alpha: opacity));
 
     final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
@@ -232,7 +231,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       if (startIndex == -1) startIndex = 0;
     }
 
-    // 🔥 2번 기능: 대표사진 탭 시 하단 바텀뷰의 시작점 동기화
     _lastSyncedIndex = startIndex; 
 
     _pageController?.dispose();
@@ -248,7 +246,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           markerId: MarkerId("pl$i"),
           position: trip.places[i].centroid,
           icon: await _getPhotoMarker(asset, Colors.white), 
-          zIndex: 2, 
+          zIndexInt: 2, // 🔥 수정: zIndex 대신 zIndexInt 사용
         ));
       }
     }
@@ -258,7 +256,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
         Polyline(
           polylineId: PolylineId("p$index"), 
           points: trip.path, 
-          color: Colors.orange.withOpacity(0.4), 
+          color: Colors.orange.withValues(alpha: 0.4), // 🔥 수정: withOpacity 대신 withValues 사용
           width: 5
         ) 
       };
@@ -282,7 +280,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
           icon: await _getArrowMarker(arrowOpacity.clamp(0.2, 1.0)),
           rotation: bearing, 
           anchor: const Offset(0.5, 0.5),
-          zIndex: 1, 
+          zIndexInt: 1, // 🔥 수정: zIndex 대신 zIndexInt 사용
         ));
       }
     } else {
@@ -306,7 +304,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng));
   }
 
-  // 🔥 1번 기능: 캔버스를 키우고 배지를 바깥으로 완전히 빼냄
   Future<BitmapDescriptor> _getPhotoMarker(pm.AssetEntity entity, Color borderColor, {int? count}) async {
     final data = await entity.thumbnailDataWithSize(const pm.ThumbnailSize(100, 100));
     if (data == null) return BitmapDescriptor.defaultMarker;
@@ -315,7 +312,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     
-    // 캔버스 사이즈 확장
     const double canvasSize = 100.0; 
     const double photoSize = 65.0; 
     const double dxOffset = 10.0;
@@ -325,7 +321,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     canvas.clipPath(Path()..addOval(const Rect.fromLTWH(dxOffset + 4, dyOffset + 4, photoSize - 8, photoSize - 8)));
     canvas.drawImageRect(fi.image, Rect.fromLTWH(0, 0, fi.image.width.toDouble(), fi.image.height.toDouble()), const Rect.fromLTWH(dxOffset, dyOffset, photoSize, photoSize), Paint());
     
-    // 카톡 알림처럼 사진 우측 상단 밖으로 배지 튀어나오게
     if (count != null && count > 0) {
       String text = count > 99 ? "99+" : count.toString();
       final textPainter = TextPainter(
@@ -411,20 +406,19 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     );
   }
 
-  // 🔥 3번 기능: 3000장도 잡고 드래그하면 쾌속으로 넘어가는 RawScrollbar 적용
   Widget _buildVerticalFastScroller() {
     final trip = _trips[_selectedTripIndex!];
     final allPhotos = trip.places.expand((p) => p.photos).toList();
 
     return Container(
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.5), 
+        color: Colors.black.withValues(alpha: 0.5), // 🔥 수정: withOpacity 대신 withValues 사용
         borderRadius: BorderRadius.circular(30)
       ),
       child: RawScrollbar(
         controller: _verticalScrollController,
         thumbVisibility: true,
-        interactive: true, // 터치/드래그 활성화
+        interactive: true, 
         thickness: 6.0,
         radius: const Radius.circular(10),
         thumbColor: Colors.white70,
@@ -465,7 +459,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
     return SizedBox(
       height: 120, 
       child: PageView.builder(
-        key: ValueKey(_selectedTripIndex), // 🔥 오류 해결: 뷰를 완전히 분리하여 다중 컨트롤러 충돌 방지
+        key: ValueKey(_selectedTripIndex), 
         controller: _pageController,
         itemCount: allPhotos.length,
         itemBuilder: (context, idx) {
@@ -476,7 +470,6 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
             animation: _pageController!,
             builder: (context, child) {
               double value = 1.0;
-              // 🔥 오류 해결: 클라이언트와 포지션 개수를 명확히 체크
               if (_pageController!.hasClients && _pageController!.positions.length == 1 && _pageController!.position.haveDimensions) {
                 value = _pageController!.page! - idx;
                 value = (1 - (value.abs() * 0.3)).clamp(0.0, 1.0);
