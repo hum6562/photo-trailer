@@ -34,7 +34,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   int _lastSyncedIndex = -1;
 
   Set<Marker> _markers = {};
-  List<Marker> _rawOverviewMarkers = []; 
+  fianl List<Marker> _rawOverviewMarkers = []; 
   
   Set<Polyline> _polylines = {};
   List<Trip> _trips = [];
