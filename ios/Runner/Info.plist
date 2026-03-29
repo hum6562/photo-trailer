@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- 👇 여기에 사진첩/위치 권한을 추가했습니다! 👇 -->
+    <!-- 사진첩/위치 권한을 추가됨 -->
     <key>NSPhotoLibraryUsageDescription</key>
     <string>여행 앨범을 분석하고 지도를 만들기 위해 사진첩 접근 권한이 필요합니다.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
@@ -11,7 +11,7 @@
     <string>지도에 현재 위치를 표시하거나 사진 위치를 확인하기 위해 권한이 필요합니다.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>앱이 실행 중일 때 위치 정보를 사용합니다.</string>
-    <!-- 👆 여기까지 👆 -->
+    <!-- 여기까지  -->
 
     <key>CADisableMinimumFrameDurationOnPhone</key>
     <true/>
