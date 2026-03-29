@@ -246,7 +246,7 @@ class UltimateTravelEngine {
     return photos;
   }
 
-  // 🔥 main.dart에서도 쓸 수 있도록 public으로 변경
+  // main.dart에서도 쓸 수 있도록 public으로 변경
   double getDistance(LatLng p1, LatLng p2) {
     var p = 0.017453292519943295;
     var a = 0.5 - cos((p2.latitude - p1.latitude) * p) / 2 + 
