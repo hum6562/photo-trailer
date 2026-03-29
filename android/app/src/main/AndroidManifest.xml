@@ -13,7 +13,7 @@
         <meta-data
         android:name="io.flutter.embedding.android.EnableImpeller"
         android:value="false" />
-        <!-- ⭐ 핵심: 구글 지도 API 키는 반드시 여기에 별도로 있어야 합니다! -->
+        <!-- 구글 지도 API 키 자리 -->
         <meta-data android:name="com.google.android.geo.API_KEY"
                    android:value="AIzaSyAYyjgFRzXH9fW-av6DLUM-T70KYGB3reA"/>
 
