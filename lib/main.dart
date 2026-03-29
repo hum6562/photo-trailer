@@ -44,7 +44,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
   bool _isTripLoading = false;
   bool _showStatusCard = true; 
   
-  // 🔥 전체 분석 완료 여부를 추적하는 변수 추가
+  // 전체 분석 완료 여부를 추적하는 변수 추가함
   bool _isAllLoaded = false; 
 
   String _statusText = "준비 중...";
@@ -221,7 +221,7 @@ class _PhotoMapScreenState extends State<PhotoMapScreen> {
       _trips = analyzedTrips;
       _isGlobalLoading = false;
       
-      // 🔥 전체 로딩이 실행된 경우 플래그를 true로 변경하여 버튼을 완전히 숨김
+      // 전체 로딩이 실행된 경우 플래그를 true로 변경하여 버튼을 완전히 숨김
       if (loadAll) {
         _isAllLoaded = true;
       }
